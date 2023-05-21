@@ -1,10 +1,42 @@
+use std::hash::Hash;
+use std::time::{Duration, Instant};
 use iced::{Application, button, Button, Clipboard, Column, Element, executor, Font, HorizontalAlignment, Length, Row, Settings, Text};
-use iced_futures::Command;
+use iced_futures::{BoxStream, Command};
+use iced_native::Subscription;
 
 struct GUI {
+    last_update: Instant,
+    total_duration: Duration,
     tick_state: TickState,
     start_stop_button_state: button::State,
     reset_button_state: button::State,
+}
+
+pub struct Timer {
+    duration: Duration,
+}
+
+impl Timer {
+    fn new(duration: Duration) -> Timer {
+        Timer { duration }
+    }
+}
+
+impl <H, E> iced_native::subscription::Recipe<H, E> for Timer where H: std::hash::Hasher {
+    type Output = Instant;
+    
+    fn hash(&self, state: &mut H) {
+        use std::hash::Hash;
+        std::any::TypeId::of::<Self>().hash(state);
+        self.duration.hash(state)
+    }
+
+    fn stream(self: Box<Self>, _input: BoxStream<E>) -> BoxStream<Self::Output> {
+        use iced_futures::futures::stream::StreamExt;
+        async_std::stream::interval(self.duration)
+            .map(|_| Instant::now())
+            .boxed()
+    }
 }
 
 // const FONT: Font = Font::External {
@@ -17,7 +49,13 @@ pub enum Message {
     Start,
     Stop,
     Reset,
+    Update,
 }
+
+const FPS: u64 = 30;
+const MILLISEC: u64 = 1000;
+const MINUTE: u64 = 60;
+const HOUR: u64 = 60 * MINUTE;
 
 pub enum TickState {
     Stopped,
@@ -32,6 +70,8 @@ impl Application for GUI {
     fn new(_flags: ()) -> (GUI, Command<Self::Message>) {
         (
             GUI {
+                last_update: Instant::now(),
+                total_duration: Duration::default(),
                 tick_state: TickState::Stopped,
                 start_stop_button_state: button::State::new(),
                 reset_button_state: button::State::new(),
@@ -50,12 +90,32 @@ impl Application for GUI {
             Message::Stop => {
                 self.tick_state = TickState::Stopped;
             }
-            Message::Reset => {}
+            Message::Reset => {
+                self.last_update = Instant::now();
+                self.total_duration = Duration::default();
+            }
+            Message::Update => {
+                match self.tick_state {
+                    TickState::Ticking => {
+                        let new_update = Instant::now();
+                        self.total_duration += new_update - self.last_update;
+                        self.last_update = new_update;
+                    }
+                    _ => {}
+                }
+            }
         }
         Command::none()
     }
     fn view(&mut self) -> Element<Self::Message> {
-        let duration_text = "00:00:00.00";
+        let second = self.total_duration.as_secs();
+        let duration_text = format!(
+            "{:0>2}:{:0>2}:{:0>2}.{:0>2}",
+            second / HOUR,
+            (second % HOUR) / MINUTE,
+            second % MINUTE,
+            self.total_duration.subsec_millis() / 10,
+        );
 
         // prepare start/stop text
         let start_stop_text = match self.tick_state {
@@ -100,6 +160,10 @@ impl Application for GUI {
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+    fn subscription(&self) -> Subscription<Self::Message> {
+        let timer = Timer::new(Duration::from_millis(MILLISEC / FPS));
+        iced::Subscription::from_recipe(timer).map(|_| Message::Update)
     }
 }
 
